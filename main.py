@@ -90,6 +90,6 @@ def handle_message(event):
         reply = "⚠️ 請輸入要翻譯的文字\n範例：翻{content} 你好"
     else:
         try:
-            reply = f"🌐 {target_lang}\n{translate_with_claude(content, target_lang)}"
+            reply = "🌐 {target_lang}\n{translate_with_claude(content, target_lang)}"
         except Exception as e:
             reply = "翻譯失敗，請稍後再試"
