@@ -92,4 +92,4 @@ def handle_message(event):
         try:
             reply = f"🌐 {target_lang}\n{translate_with_claude(content, target_lang)}"
         except Exception as e:
-            reply = f"❌
+            reply = "翻譯失敗，請稍後再試"
