@@ -87,7 +87,7 @@ def handle_message(event):
     if target_lang == "help":
         reply = HELP_TEXT
     elif target_lang == "missing_text":
-        reply = f"⚠️ 請輸入要翻譯的文字\n範例：翻{content} 你好"
+        reply = "⚠️ 請輸入要翻譯的文字\n範例：翻{content} 你好"
     else:
         try:
             reply = f"🌐 {target_lang}\n{translate_with_claude(content, target_lang)}"
