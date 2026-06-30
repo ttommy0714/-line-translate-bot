@@ -1,5 +1,4 @@
 import os
-import anthropic
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -8,14 +7,13 @@ from linebot.v3.messaging import (
     ReplyMessageRequest, TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from deep_translator import GoogleTranslator
 
 app = Flask(__name__)
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 def is_chinese(text):
     for ch in text:
@@ -25,15 +23,10 @@ def is_chinese(text):
 
 def auto_translate(text):
     if is_chinese(text):
-        target = "Indonesian"
+        target = "id"
     else:
-        target = "Traditional Chinese"
-    msg = anthropic_client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[{"role":"user","content":"Translate the following text to "+target+". Return ONLY the translated text, nothing else.\n\n"+text}]
-    )
-    return msg.content[0].text.strip()
+        target = "zh-TW"
+    return GoogleTranslator(source="auto", target=target).translate(text)
 
 @app.route("/callback", methods=["POST"])
 def callback():
