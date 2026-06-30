@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 from flask import Flask, abort, jsonify, request
 from linebot.v3 import WebhookHandler
@@ -34,51 +35,130 @@ def is_chinese(text):
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
-def build_translation_attempts(target):
+def normalize_text(text):
+    replacements = {
+        "，": ", ",
+        "。": ". ",
+        "！": "! ",
+        "？": "? ",
+        "；": "; ",
+        "：": ": ",
+        "、": ", ",
+        "「": " ",
+        "」": " ",
+        "『": " ",
+        "』": " ",
+        "（": "(",
+        "）": ")",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def split_text(text):
+    parts = re.split(r"[，。！？；：、,!.?;:\n]+", text)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def try_translate_once(text, source, target):
+    translated = GoogleTranslator(source=source, target=target).translate(text)
+    logger.info(
+        "Translation attempt source=%s target=%s input=%r output=%r",
+        source,
+        target,
+        text,
+        translated,
+    )
+
+    if translated and translated.strip() and translated.strip() != text.strip():
+        return translated.strip()
+
+    return None
+
+
+def direct_translate(text, target):
     if target == "id":
-        return [
-            ("auto", "id"),
-            ("auto", "indonesian"),
-            ("chinese (traditional)", "indonesian"),
-            ("chinese (simplified)", "indonesian"),
+        attempts = [
+            (text, "auto", "id"),
+            (text, "auto", "indonesian"),
+            (normalize_text(text), "auto", "id"),
+            (normalize_text(text), "auto", "indonesian"),
+            (normalize_text(text), "chinese (traditional)", "indonesian"),
+            (normalize_text(text), "chinese (simplified)", "indonesian"),
+        ]
+    else:
+        attempts = [
+            (text, "auto", "zh-TW"),
+            (text, "auto", "chinese (traditional)"),
+            (normalize_text(text), "auto", "zh-TW"),
+            (normalize_text(text), "auto", "chinese (traditional)"),
+            (normalize_text(text), "indonesian", "chinese (traditional)"),
+            (normalize_text(text), "english", "chinese (traditional)"),
         ]
 
-    return [
-        ("auto", "zh-TW"),
-        ("auto", "chinese (traditional)"),
-        ("indonesian", "chinese (traditional)"),
-        ("english", "chinese (traditional)"),
-    ]
-
-
-def translate_with_fallback(text, target):
     errors = []
-    same_text_result = None
-
-    for source_code, target_code in build_translation_attempts(target):
+    for candidate_text, source_code, target_code in attempts:
+        if not candidate_text:
+            continue
         try:
-            translated = GoogleTranslator(source=source_code, target=target_code).translate(text)
-            logger.info(
-                "Translation attempt source=%s target=%s input=%r output=%r",
-                source_code,
-                target_code,
-                text,
-                translated,
-            )
-
-            if translated and translated.strip():
-                if translated.strip() != text.strip():
-                    return translated.strip()
-                same_text_result = translated.strip()
+            translated = try_translate_once(candidate_text, source_code, target_code)
+            if translated:
+                return translated
         except Exception as exc:
             errors.append(f"{source_code}->{target_code}: {exc}")
 
-    logger.warning("Translation fallback exhausted. input=%r errors=%s", text, errors)
+    logger.warning("Direct translation failed. input=%r target=%s errors=%s", text, target, errors)
+    return None
 
-    if same_text_result:
-        return same_text_result
 
-    return "目前翻譯服務暫時無法處理這句，請稍後再試。"
+def two_step_translate(text, target):
+    try:
+        normalized = normalize_text(text)
+        if target == "id":
+            english = try_translate_once(normalized, "auto", "english")
+            if english:
+                return try_translate_once(english, "english", "indonesian")
+        else:
+            english = try_translate_once(normalized, "auto", "english")
+            if english:
+                return try_translate_once(english, "english", "chinese (traditional)")
+    except Exception:
+        logger.exception("Two-step translation failed. input=%r target=%s", text, target)
+
+    return None
+
+
+def chunk_translate(text, target):
+    chunks = split_text(text)
+    if len(chunks) <= 1:
+        return None
+
+    translated_chunks = []
+    for chunk in chunks:
+        translated = direct_translate(chunk, target) or two_step_translate(chunk, target)
+        if not translated:
+            return None
+        translated_chunks.append(translated)
+
+    return " ".join(translated_chunks).strip()
+
+
+def translate_with_fallback(text, target):
+    translated = direct_translate(text, target)
+    if translated:
+        return translated
+
+    translated = two_step_translate(text, target)
+    if translated:
+        return translated
+
+    translated = chunk_translate(text, target)
+    if translated:
+        return translated
+
+    logger.warning("Translation fallback exhausted. input=%r target=%s", text, target)
+    return "Maaf, layanan terjemahan sementara tidak dapat memproses pesan ini. Silakan coba lagi."
 
 
 def auto_translate(text):
@@ -108,6 +188,7 @@ def test_translate():
     return jsonify(
         {
             "input": text,
+            "normalized_input": normalize_text(text),
             "contains_chinese": is_chinese(text),
             "output": auto_translate(text),
             "target": "id" if is_chinese(text) else "zh-TW",
@@ -148,7 +229,7 @@ def handle_message(event):
         reply_text = auto_translate(text)
     except Exception:
         logger.exception("Translation failed. input=%r", text)
-        reply_text = "目前翻譯服務暫時失敗，請稍後再試。"
+        reply_text = "Maaf, layanan terjemahan sementara gagal. Silakan coba lagi."
 
     try:
         with ApiClient(configuration) as api_client:
