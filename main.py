@@ -24,9 +24,16 @@ def is_chinese(text):
 def auto_translate(text):
     if is_chinese(text):
         target = "id"
+        source = "zh-TW"
     else:
         target = "zh-TW"
-    return GoogleTranslator(source="auto", target=target).translate(text)
+        source = "auto"
+    result = GoogleTranslator(source=source, target=target).translate(text)
+    if result is None or result.strip() == text.strip():
+        result = GoogleTranslator(source="auto", target=target).translate(text)
+    if result is None or result.strip() == text.strip():
+        return "Translation unavailable for this message."
+    return result
 
 @app.route("/callback", methods=["POST"])
 def callback():
