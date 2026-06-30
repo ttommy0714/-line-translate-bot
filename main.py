@@ -34,24 +34,51 @@ def is_chinese(text):
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
-def translate_with_fallback(text, target):
-    errors = []
-    attempts = [
-        ("auto", target),
-        ("auto", "indonesian" if target == "id" else "chinese (traditional)"),
-        ("auto", "zh-TW" if target == "zh-TW" else "id"),
+def build_translation_attempts(target):
+    if target == "id":
+        return [
+            ("auto", "id"),
+            ("auto", "indonesian"),
+            ("chinese (traditional)", "indonesian"),
+            ("chinese (simplified)", "indonesian"),
+        ]
+
+    return [
+        ("auto", "zh-TW"),
+        ("auto", "chinese (traditional)"),
+        ("indonesian", "chinese (traditional)"),
+        ("english", "chinese (traditional)"),
     ]
 
-    for source_code, target_code in attempts:
+
+def translate_with_fallback(text, target):
+    errors = []
+    same_text_result = None
+
+    for source_code, target_code in build_translation_attempts(target):
         try:
             translated = GoogleTranslator(source=source_code, target=target_code).translate(text)
-            if translated and translated.strip() and translated.strip() != text.strip():
-                return translated
+            logger.info(
+                "Translation attempt source=%s target=%s input=%r output=%r",
+                source_code,
+                target_code,
+                text,
+                translated,
+            )
+
+            if translated and translated.strip():
+                if translated.strip() != text.strip():
+                    return translated.strip()
+                same_text_result = translated.strip()
         except Exception as exc:
             errors.append(f"{source_code}->{target_code}: {exc}")
 
-    logger.warning("Translation fallback exhausted. errors=%s", errors)
-    return "Translation unavailable for this message."
+    logger.warning("Translation fallback exhausted. input=%r errors=%s", text, errors)
+
+    if same_text_result:
+        return same_text_result
+
+    return "目前翻譯服務暫時無法處理這句，請稍後再試。"
 
 
 def auto_translate(text):
@@ -120,8 +147,8 @@ def handle_message(event):
     try:
         reply_text = auto_translate(text)
     except Exception:
-        logger.exception("Translation failed.")
-        reply_text = "Translation failed, please try again."
+        logger.exception("Translation failed. input=%r", text)
+        reply_text = "目前翻譯服務暫時失敗，請稍後再試。"
 
     try:
         with ApiClient(configuration) as api_client:
