@@ -34,23 +34,29 @@ def is_chinese(text):
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
+def translate_with_fallback(text, target):
+    errors = []
+    attempts = [
+        ("auto", target),
+        ("auto", "indonesian" if target == "id" else "chinese (traditional)"),
+        ("auto", "zh-TW" if target == "zh-TW" else "id"),
+    ]
+
+    for source_code, target_code in attempts:
+        try:
+            translated = GoogleTranslator(source=source_code, target=target_code).translate(text)
+            if translated and translated.strip() and translated.strip() != text.strip():
+                return translated
+        except Exception as exc:
+            errors.append(f"{source_code}->{target_code}: {exc}")
+
+    logger.warning("Translation fallback exhausted. errors=%s", errors)
+    return "Translation unavailable for this message."
+
+
 def auto_translate(text):
-    if is_chinese(text):
-        source = "zh-TW"
-        target = "id"
-    else:
-        source = "auto"
-        target = "zh-TW"
-
-    translated = GoogleTranslator(source=source, target=target).translate(text)
-
-    if translated is None or translated.strip() == text.strip():
-        translated = GoogleTranslator(source="auto", target=target).translate(text)
-
-    if translated is None or translated.strip() == text.strip():
-        return "Translation unavailable for this message."
-
-    return translated
+    target = "id" if is_chinese(text) else "zh-TW"
+    return translate_with_fallback(text, target)
 
 
 @app.route("/", methods=["GET"])
@@ -65,6 +71,19 @@ def health_detail():
             "status": "OK" if is_config_ready() else "CONFIG_MISSING",
             "line_channel_secret_set": bool(LINE_CHANNEL_SECRET),
             "line_channel_access_token_set": bool(LINE_CHANNEL_ACCESS_TOKEN),
+        }
+    )
+
+
+@app.route("/test-translate", methods=["GET"])
+def test_translate():
+    text = request.args.get("q", "你好")
+    return jsonify(
+        {
+            "input": text,
+            "contains_chinese": is_chinese(text),
+            "output": auto_translate(text),
+            "target": "id" if is_chinese(text) else "zh-TW",
         }
     )
 
