@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from threading import Thread
 
 from flask import Flask, abort, jsonify, request
 from linebot.v3 import WebhookHandler
@@ -9,6 +10,7 @@ from linebot.v3.messaging import (
     ApiClient,
     Configuration,
     MessagingApi,
+    PushMessageRequest,
     ReplyMessageRequest,
     TextMessage,
 )
@@ -44,36 +46,17 @@ LANGUAGES = {
 }
 
 ALIASES = {
-    "zh": "zh-TW",
-    "tw": "zh-TW",
-    "cn": "zh-TW",
-    "chinese": "zh-TW",
-    "中文": "zh-TW",
-    "繁中": "zh-TW",
-    "繁體": "zh-TW",
-    "indonesia": "id",
-    "indonesian": "id",
-    "印尼": "id",
-    "印尼文": "id",
-    "english": "en",
-    "英文": "en",
-    "日本": "ja",
-    "日文": "ja",
-    "japanese": "ja",
-    "韓文": "ko",
-    "korean": "ko",
-    "越南": "vi",
-    "越南文": "vi",
-    "vietnamese": "vi",
-    "泰文": "th",
-    "thai": "th",
-    "malay": "ms",
-    "馬來": "ms",
-    "菲律賓": "fil",
-    "filipino": "fil",
-    "tagalog": "fil",
-    "spanish": "es",
-    "西班牙": "es",
+    "zh": "zh-TW", "tw": "zh-TW", "cn": "zh-TW", "chinese": "zh-TW",
+    "中文": "zh-TW", "繁中": "zh-TW", "繁體": "zh-TW",
+    "indonesia": "id", "indonesian": "id", "印尼": "id", "印尼文": "id",
+    "english": "en", "英文": "en",
+    "日本": "ja", "日文": "ja", "japanese": "ja",
+    "韓文": "ko", "korean": "ko",
+    "越南": "vi", "越南文": "vi", "vietnamese": "vi",
+    "泰文": "th", "thai": "th",
+    "malay": "ms", "馬來": "ms",
+    "菲律賓": "fil", "filipino": "fil", "tagalog": "fil",
+    "spanish": "es", "西班牙": "es",
 }
 
 
@@ -89,14 +72,11 @@ def normalize_language_code(raw_code):
     code = raw_code.strip()
     if not code:
         return None
-
     if code in LANGUAGES:
         return code
-
     lower_code = code.lower()
     if lower_code in LANGUAGES:
         return lower_code
-
     return ALIASES.get(lower_code) or ALIASES.get(code)
 
 
@@ -109,6 +89,17 @@ def get_user_key(event):
     if hasattr(source, "room_id") and source.room_id:
         return source.room_id
     return "default"
+
+
+def get_push_target(event):
+    source = event.source
+    if hasattr(source, "group_id") and source.group_id:
+        return source.group_id
+    if hasattr(source, "room_id") and source.room_id:
+        return source.room_id
+    if hasattr(source, "user_id") and source.user_id:
+        return source.user_id
+    return None
 
 
 def set_user_target(user_key, lang_code):
@@ -143,46 +134,32 @@ def handle_command(text, user_key):
 
     if lower in ["/help", "help", "說明"]:
         return help_text()
-
     if lower == "/auto":
         USER_TARGET_LANG.pop(user_key, None)
         return "已切換為自動模式：中文→印尼文；非中文→繁體中文。"
-
     if lower == "/lang":
         lang_code = USER_TARGET_LANG.get(user_key)
         if not lang_code:
             return "目前是自動模式：中文→印尼文；非中文→繁體中文。"
         lang = LANGUAGES[lang_code]
         return f"目前目標語言：{lang['name_zh']}（{lang_code}）"
-
     if lower.startswith("/to "):
         raw_code = normalized.split(maxsplit=1)[1]
         lang_code = normalize_language_code(raw_code)
         if not lang_code:
             return "不支援這個語言代碼。\n\n" + help_text()
-
         set_user_target(user_key, lang_code)
         lang = LANGUAGES[lang_code]
         return f"已切換翻譯目標語言：{lang['name_zh']}（{lang_code}）。"
-
     return None
 
 
 def normalize_text(text):
     replacements = {
-        "，": ", ",
-        "。": ". ",
-        "！": "! ",
-        "？": "? ",
-        "；": "; ",
-        "：": ": ",
-        "、": ", ",
-        "「": " ",
-        "」": " ",
-        "『": " ",
-        "』": " ",
-        "（": "(",
-        "）": ")",
+        "，": ", ", "。": ". ", "！": "! ", "？": "? ",
+        "；": "; ", "：": ": ", "、": ", ",
+        "「": " ", "」": " ", "『": " ", "』": " ",
+        "（": "(", "）": ")",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
@@ -190,8 +167,18 @@ def normalize_text(text):
 
 
 def split_text(text):
-    parts = re.split(r"[，。！？；：、,!.?;:\n]+", text)
-    return [part.strip() for part in parts if part.strip()]
+    # Keep chunks moderate to avoid GoogleTranslator hanging on longer text.
+    rough_parts = re.split(r"[，。！？；：、,!.?;:\n]+", text)
+    chunks = []
+    for part in rough_parts:
+        part = part.strip()
+        if not part:
+            continue
+        while len(part) > 80:
+            chunks.append(part[:80])
+            part = part[80:]
+        chunks.append(part)
+    return chunks
 
 
 def get_target_candidates(target):
@@ -209,17 +196,14 @@ def try_translate_once(text, source, target):
         text,
         translated,
     )
-
     if translated and translated.strip() and translated.strip() != text.strip():
         return translated.strip()
-
     return None
 
 
 def direct_translate(text, target):
     normalized = normalize_text(text)
     candidates = []
-
     for target_code in get_target_candidates(target):
         candidates.append((text, "auto", target_code))
         if normalized != text:
@@ -236,8 +220,9 @@ def direct_translate(text, target):
             (normalized, "english", "chinese (traditional)"),
         ])
 
+    # Limit attempts to reduce long blocking on LINE webhook processing.
     errors = []
-    for candidate_text, source_code, target_code in candidates:
+    for candidate_text, source_code, target_code in candidates[:4]:
         if not candidate_text:
             continue
         try:
@@ -256,12 +241,10 @@ def two_step_translate(text, target):
         normalized = normalize_text(text)
         if target == "en":
             return None
-
         english = try_translate_once(normalized, "auto", "english")
         if not english:
             return None
-
-        for target_code in get_target_candidates(target):
+        for target_code in get_target_candidates(target)[:2]:
             try:
                 translated = try_translate_once(english, "english", target_code)
                 if translated:
@@ -270,7 +253,6 @@ def two_step_translate(text, target):
                 logger.exception("Two-step target attempt failed. target_code=%s", target_code)
     except Exception:
         logger.exception("Two-step translation failed. input=%r target=%s", text, target)
-
     return None
 
 
@@ -278,30 +260,29 @@ def chunk_translate(text, target):
     chunks = split_text(text)
     if len(chunks) <= 1:
         return None
-
     translated_chunks = []
-    for chunk in chunks:
+    for chunk in chunks[:12]:
         translated = direct_translate(chunk, target) or two_step_translate(chunk, target)
         if not translated:
             return None
         translated_chunks.append(translated)
-
+    if len(chunks) > 12:
+        translated_chunks.append("...（文字過長，後段未翻譯）")
     return " ".join(translated_chunks).strip()
 
 
 def translate_with_fallback(text, target):
+    if len(text) > 900:
+        return "文字過長，請分段傳送，每次建議 300 字以內。"
     translated = direct_translate(text, target)
     if translated:
         return translated
-
-    translated = two_step_translate(text, target)
-    if translated:
-        return translated
-
     translated = chunk_translate(text, target)
     if translated:
         return translated
-
+    translated = two_step_translate(text, target)
+    if translated:
+        return translated
     logger.warning("Translation fallback exhausted. input=%r target=%s", text, target)
     return "Maaf, layanan terjemahan sementara tidak dapat memproses pesan ini. Silakan coba lagi."
 
@@ -309,6 +290,37 @@ def translate_with_fallback(text, target):
 def auto_translate(text, user_key=None):
     target = get_user_target(user_key or "default", text)
     return translate_with_fallback(text, target)
+
+
+def reply_message(reply_token, text):
+    with ApiClient(configuration) as api_client:
+        MessagingApi(api_client).reply_message(
+            ReplyMessageRequest(reply_token=reply_token, messages=[TextMessage(text=text)])
+        )
+
+
+def push_message(to, text):
+    with ApiClient(configuration) as api_client:
+        MessagingApi(api_client).push_message(
+            PushMessageRequest(to=to, messages=[TextMessage(text=text)])
+        )
+
+
+def translate_and_push(text, user_key, push_target):
+    try:
+        result = auto_translate(text, user_key)
+    except Exception:
+        logger.exception("Async translation failed. input=%r", text)
+        result = "Maaf, layanan terjemahan sementara gagal. Silakan coba lagi."
+
+    if not push_target:
+        logger.warning("No push target available; cannot send async translation.")
+        return
+
+    try:
+        push_message(push_target, result)
+    except Exception:
+        logger.exception("LINE push failed. push_target=%s", push_target)
 
 
 @app.route("/", methods=["GET"])
@@ -347,11 +359,9 @@ def callback():
     if not is_config_ready():
         logger.error("LINE environment variables are missing.")
         abort(500)
-
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     logger.info("LINE webhook received. body_length=%s", len(body))
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -360,14 +370,12 @@ def callback():
     except Exception:
         logger.exception("Unhandled callback error.")
         abort(500)
-
     return "OK"
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     text = event.message.text.strip()
-
     if not text:
         return
 
@@ -375,25 +383,15 @@ def handle_message(event):
     command_reply = handle_command(text, user_key)
 
     if command_reply is not None:
-        reply_text = command_reply
-    else:
-        try:
-            reply_text = auto_translate(text, user_key)
-        except Exception:
-            logger.exception("Translation failed. input=%r", text)
-            reply_text = "Maaf, layanan terjemahan sementara gagal. Silakan coba lagi."
+        reply_message(event.reply_token, command_reply)
+        return
 
-    try:
-        with ApiClient(configuration) as api_client:
-            MessagingApi(api_client).reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=reply_text)],
-                )
-            )
-    except Exception:
-        logger.exception("LINE reply failed. Check LINE_CHANNEL_ACCESS_TOKEN.")
-        raise
+    # Reply immediately so LINE will not appear to hang when GoogleTranslator is slow.
+    reply_message(event.reply_token, "翻譯中，請稍候...")
+
+    push_target = get_push_target(event)
+    worker = Thread(target=translate_and_push, args=(text, user_key, push_target), daemon=True)
+    worker.start()
 
 
 if __name__ == "__main__":
